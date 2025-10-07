@@ -17,7 +17,7 @@ class Detector:
             onnx_model: ONNX 模型的路径。
             input_image: 输入图像的路径。
             confidence_thres: 用于过滤检测结果的置信度阈值。
-            iou_thres: 非极大值抑制（NMS）的 IoU（交并比）阈值。
+            iou_thres: 非极大值抑制(NMS)的 IoU(交并比)阈值。
         """
         self.onnx_model = onnx_model
         self.input_image = input_image

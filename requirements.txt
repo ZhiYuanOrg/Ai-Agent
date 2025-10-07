@@ -1,3 +1,6 @@
 requests
 python-dotenv
 langchain
+numpy
+opencv-python
+onnxruntime
