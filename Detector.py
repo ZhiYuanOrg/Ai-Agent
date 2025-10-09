@@ -158,7 +158,7 @@ class Detector:
         """
         # 提取边界框的坐标
         x1, y1, w, h = box
-
+        #左上角坐标(x1, y1)，宽度w，高度h
         # 获取类别对应的颜色
         color = self.color_palette[class_id]
 
@@ -182,6 +182,49 @@ class Detector:
         # 在图像上绘制标签文本
         cv2.putText(img, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
+    def extract_detection_info(self, output):
+        """
+        提取检测框的类别、距离和四角坐标信息
+        返回：obstacles, distances, positions
+        """
+        outputs = np.transpose(np.squeeze(output[0]))
+        rows = outputs.shape[0]
+        obstacles, distances, positions = [], [], []
+
+        ratio = self.img_width / self.input_width, self.img_height / self.input_height
+
+        for i in range(rows):
+            classes_scores = outputs[i][4:]
+            max_score = np.amax(classes_scores)
+            if max_score >= self.confidence_thres:
+                class_id = np.argmax(classes_scores)
+                x, y, w, h = outputs[i][0], outputs[i][1], outputs[i][2], outputs[i][3]
+
+                # 坐标还原
+                x -= self.dw/2
+                y -= self.dh/2
+                x /= ratio[0]
+                y /= ratio[1]
+                w /= ratio[0]
+                h /= ratio[1]
+                left = int(x - w / 2)
+                top = int(y - h / 2)
+                right = int(x + w / 2)
+                bottom = int(y + h / 2)
+
+                # 四角坐标
+                pos = [
+                    (left, top),      # 左上
+                    (right, top),     # 右上
+                    (left, bottom),   # 左下
+                    (right, bottom)   # 右下
+                ]
+                obstacles.append(self.classes[class_id])
+                # 距离可以用检测框中心到图像底部的像素距离，或自定义
+                distances.append(round(h, 2))  # 这里用高度近似距离
+                positions.append(pos)
+        return obstacles, distances, positions
+
     def main(self):
         # 使用 ONNX 模型创建推理会话，自动选择CPU或GPU
         session = ort.InferenceSession(
@@ -204,9 +247,10 @@ class Detector:
 
         # 使用预处理后的图像数据运行推理
         outputs = session.run(None, {model_inputs[0].name: img_data})
-
-        # 对输出进行后处理以获取输出图像
-        return self.postprocess(self.img, outputs)  # 输出图像
+        # 提取检测信息
+        obstacles, distances, positions = self.extract_detection_info(outputs)
+        # 返回检测结果和图像
+        return self.postprocess(self.img, outputs), obstacles, distances, positions  # 输出图像
 
 
 if __name__ == "__main__":

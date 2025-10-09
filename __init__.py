@@ -10,7 +10,7 @@ load_dotenv()
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 class OpenRouter(LLM):
-    model_name: str = "deepseek/deepseek-chat-v3.1:free" 
+    model_name: str = "openai/gpt-oss-20b:free" 
     temperature: float = 0.7 
 
     @property
@@ -57,6 +57,8 @@ class OpenRouter(LLM):
                     ],
                 },
             )
+            resp_json = response.json()
+            #print("API返回内容:", resp_json)
             return response.json()["output"][0]["content"][0]["text"]
             
         except requests.exceptions.RequestException as e:
