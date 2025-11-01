@@ -3,41 +3,110 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 from utils.read_cls import load_class_names
-
+from openni import openni2
 # 类外定义类别映射关系，使用字典格式
 CLASS_NAMES =load_class_names("models/coco.yaml")
 
 class Detector:
     """目标检测模型类，用于处理推理和可视化。"""
 
-    def __init__(self, onnx_model, input_image, confidence_thres, iou_thres):
+    def __init__(self, onnx_model,  confidence_thres=0.5, iou_thres=0.5, use_depth_camera=False):
         """
         初始化 Detector 类的实例。
         参数：
             onnx_model: ONNX 模型的路径。
             input_image: 输入图像的路径。
             confidence_thres: 用于过滤检测结果的置信度阈值。
-            iou_thres: 非极大值抑制(NMS)的 IoU(交并比)阈值。
+            iou_thres: 非极大值抑制（NMS）的 IoU（交并比）阈值。
         """
         self.onnx_model = onnx_model
-        self.input_image = input_image
         self.confidence_thres = confidence_thres
         self.iou_thres = iou_thres
-
+        self.use_depth_camera = use_depth_camera
         # 加载类别名称
         self.classes = CLASS_NAMES
 
         # 为每个类别生成一个颜色调色板
         self.color_palette = np.random.uniform(0, 255, size=(len(self.classes), 3))
 
-    def preprocess(self):
+        # 深度相机相关变量
+        self.dev = None
+        self.depth_stream = None
+        self.cap = None
+        self.dpt = None
+
+        # 初始化深度相机（如果启用）
+        if self.use_depth_camera:
+            self.initialize_depth_camera()
+
+    def initialize_depth_camera(self):
+        """初始化深度相机"""
+        try:
+            openni2.initialize()
+            self.dev = openni2.Device.open_any()
+            print("深度相机设备信息:", self.dev.get_device_info())
+
+            # 创建深度流
+            self.depth_stream = self.dev.create_depth_stream()
+            self.dev.set_image_registration_mode(True)
+            self.depth_stream.start()
+            print("深度流已启动")
+            # 创建彩色摄像头流
+            self.cap = cv2.VideoCapture(1)
+
+            # 创建深度图像显示窗口并设置鼠标回调
+            cv2.namedWindow('depth')
+            cv2.setMouseCallback('depth', self.mouse_callback)
+
+            print("深度相机初始化成功")
+        except Exception as e:
+            print(f"深度相机初始化失败: {e}")
+            self.use_depth_camera = False
+
+    def mouse_callback(self, event, x, y, flags, param):
+        """深度图像鼠标回调函数"""
+        if event == cv2.EVENT_LBUTTONDBLCLK and self.dpt is not None:
+            if y < self.dpt.shape[0] and x < self.dpt.shape[1]:
+                print(f"坐标({y}, {x})的深度值: {self.dpt[y, x]}")
+
+    def get_depth_frame(self):
+        """获取深度图像帧"""
+        if not self.use_depth_camera or self.depth_stream is None:
+            return None
+
+        try:
+            frame = self.depth_stream.read_frame()
+            # 转换数据格式
+            dframe_data = np.array(frame.get_buffer_as_triplet()).reshape([480, 640, 2])
+            dpt1 = np.asarray(dframe_data[:, :, 0], dtype='float32')
+            dpt2 = np.asarray(dframe_data[:, :, 1], dtype='float32')
+            dpt2 *= 255
+            self.dpt = dpt1 + dpt2
+
+            # 转换为可显示的深度图像
+            dim_gray = cv2.convertScaleAbs(self.dpt, alpha=0.17)
+            depth_colormap = cv2.applyColorMap(dim_gray, 2)
+            depth_colormap =cv2.flip(depth_colormap, 1)
+            return depth_colormap
+        except Exception as e:
+            print(f"获取深度帧失败: {e}")
+            return None
+
+    def get_color_frame(self):
+        """获取彩色图像帧"""
+        if self.use_depth_camera and self.cap is not None:
+            ret, frame = self.cap.read()
+            return frame if ret else None
+        return None
+
+    def preprocess(self, img):
         """
         对输入图像进行预处理，以便进行推理。
         返回：
             image_data: 经过预处理的图像数据，准备进行推理。
         """
         # 使用 OpenCV 读取输入图像
-        self.img = cv2.imread(self.input_image)
+        self.img = img
         # 获取输入图像的高度和宽度
         self.img_height, self.img_width = self.img.shape[:2]
 
@@ -158,7 +227,7 @@ class Detector:
         """
         # 提取边界框的坐标
         x1, y1, w, h = box
-        #左上角坐标(x1, y1)，宽度w，高度h
+
         # 获取类别对应的颜色
         color = self.color_palette[class_id]
 
@@ -182,58 +251,14 @@ class Detector:
         # 在图像上绘制标签文本
         cv2.putText(img, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
-    def extract_detection_info(self, output):
-        """
-        提取检测框的类别、距离和四角坐标信息
-        返回：obstacles, distances, positions
-        """
-        outputs = np.transpose(np.squeeze(output[0]))
-        rows = outputs.shape[0]
-        obstacles, distances, positions = [], [], []
-
-        ratio = self.img_width / self.input_width, self.img_height / self.input_height
-
-        for i in range(rows):
-            classes_scores = outputs[i][4:]
-            max_score = np.amax(classes_scores)
-            if max_score >= self.confidence_thres:
-                class_id = np.argmax(classes_scores)
-                x, y, w, h = outputs[i][0], outputs[i][1], outputs[i][2], outputs[i][3]
-
-                # 坐标还原
-                x -= self.dw/2
-                y -= self.dh/2
-                x /= ratio[0]
-                y /= ratio[1]
-                w /= ratio[0]
-                h /= ratio[1]
-                left = int(x - w / 2)
-                top = int(y - h / 2)
-                right = int(x + w / 2)
-                bottom = int(y + h / 2)
-
-                # 四角坐标
-                pos = [
-                    (left, top),      # 左上
-                    (right, top),     # 右上
-                    (left, bottom),   # 左下
-                    (right, bottom)   # 右下
-                ]
-                obstacles.append(self.classes[class_id])
-                # 距离可以用检测框中心到图像底部的像素距离，或自定义
-                distances.append(round(h, 2))  # 这里用高度近似距离
-                positions.append(pos)
-        return obstacles, distances, positions
-
-    def main(self):
+    def initialize_model(self):
+        """初始化ONNX模型"""
         # 使用 ONNX 模型创建推理会话，自动选择CPU或GPU
         session = ort.InferenceSession(
             self.onnx_model,
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"] if ort.get_device() == "GPU" else [
                 "CPUExecutionProvider"],
         )
-        # 打印模型的输入尺寸
-        print("模型名称：", self.onnx_model)
 
         # 获取模型的输入形状
         model_inputs = session.get_inputs()
@@ -242,36 +267,111 @@ class Detector:
         self.input_height = input_shape[3]
         print(f"模型输入尺寸：宽度 = {self.input_width}, 高度 = {self.input_height}")
 
-        # 预处理图像数据，确保使用模型要求的尺寸 (640x640)
-        img_data = self.preprocess()
+        return session
 
-        # 使用预处理后的图像数据运行推理
-        outputs = session.run(None, {model_inputs[0].name: img_data})
-        # 提取检测信息
-        obstacles, distances, positions = self.extract_detection_info(outputs)
-        # 返回检测结果和图像
-        return self.postprocess(self.img, outputs), obstacles, distances, positions  # 输出图像
+    def process_image(self, session, img):
+        """处理单张图像"""
+        # 预处理图像数据
+        img_data = self.preprocess(img)
+
+        # 运行推理
+        outputs = session.run(None, {session.get_inputs()[0].name: img_data})
+
+        # 后处理
+        result_img = self.postprocess(img.copy(), outputs)
+        return result_img
+
+    def run_realtime(self):
+        """实时运行目标检测（使用深度相机或普通摄像头）"""
+        session = self.initialize_model()
+
+        if not self.use_depth_camera:
+            print("正在使用普通摄像头...")
+            # 使用普通摄像头
+            self.cap = cv2.VideoCapture(0)
+
+        print("开始实时检测，按'q'退出...")
+
+        while True:
+            # 获取彩色帧
+            color_frame = self.get_color_frame()
+            if color_frame is None:
+                print("无法获取彩色帧")
+                break
+
+            # 进行目标检测
+            detected_frame = self.process_image(session, color_frame)
+            cv2.imshow('Object Detection', detected_frame)
+
+            # 如果使用深度相机，显示深度图像
+            if self.use_depth_camera:
+                depth_frame = self.get_depth_frame()
+                if depth_frame is not None:
+                    cv2.imshow('depth', depth_frame)
+
+            # 退出条件
+            key = cv2.waitKey(1)
+            if key == ord('q'):
+                break
+
+        # 释放资源
+        self.release_resources()
+
+    def release_resources(self):
+        """释放所有资源"""
+        if self.cap is not None:
+            self.cap.release()
+        if self.depth_stream is not None:
+            self.depth_stream.stop()
+        if self.dev is not None:
+            self.dev.close()
+        cv2.destroyAllWindows()
+
+    def process_single_image(self, image_path):
+        """处理单张图像（原有功能）"""
+        session = self.initialize_model()
+
+        # 读取图像
+        img = cv2.imread(image_path)
+        if img is None:
+            print(f"无法读取图像: {image_path}")
+            return None
+
+        # 处理图像
+        result_img = self.process_image(session, img)
+
+        # 显示结果
+        cv2.imshow('Object Detection', result_img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+        return result_img
 
 
+# 使用示例
 if __name__ == "__main__":
-    # 创建参数解析器以处理命令行参数
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="models/yolo11n.onnx",
-                        help="输入你的 ONNX 模型路径。")
-    parser.add_argument("--img", type=str, default=r"imgs/test.jpg", help="输入图像的路径。")
-    parser.add_argument("--conf-thres", type=float, default=0.5, help="置信度阈值")
-    parser.add_argument("--iou-thres", type=float, default=0.45, help="NMS IoU 阈值")
+    parser.add_argument('--model', type=str, default='models/yolo11n.onnx', help='ONNX模型路径')
+    parser.add_argument('--image', type=str, default=None, help='输入图像路径（如果为None则使用摄像头）')
+    parser.add_argument('--conf-thres', type=float, default=0.5, help='置信度阈值')
+    parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU阈值')
+    parser.add_argument('--depth-camera', type=bool, default=True, help='使用深度相机')
     args = parser.parse_args()
 
-    # 使用指定的参数创建实例
-    detection = Detector(args.model, args.img, args.conf_thres, args.iou_thres)
+    # 创建检测器实例
+    detector = Detector(
+        onnx_model=args.model,
+        confidence_thres=args.conf_thres,
+        iou_thres=args.iou_thres,
+        use_depth_camera=args.depth_camera
+    )
 
-    # 执行目标检测并获取输出图像
-    output_image = detection.main()
-
-    # 保存输出图像到文件
-    cv2.imwrite("imgs/od_test.jpg", output_image)
-
-    print("图像已保存为 od_test.jpg")
+    # 运行检测
+    if args.image:
+        # 处理单张图像
+        detector.process_single_image(args.image)
+    else:
+        # 实时检测
+        detector.run_realtime()
 
 
