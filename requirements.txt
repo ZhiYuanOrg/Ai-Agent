@@ -1,6 +1,10 @@
-requests
-python-dotenv
-langchain
-numpy
-opencv-python
-onnxruntime
+langchain==0.3.27
+numpy~=2.2.6
+onnxruntime==1.23.0
+opencv_python==4.12.0.88
+python-dotenv==1.1.1
+PyYAML==6.0.3
+Requests==2.32.5
+
+opencv-python~=4.12.0.88
+openni~=2.3.0
